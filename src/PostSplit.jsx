@@ -31,9 +31,8 @@ const lbl = { fontSize:11, color:"#999", letterSpacing:2, textTransform:"upperca
 
 export default function PostSplit() {
   const [screen, setScreen] = useState("home");
-  const [groups, setGroups] = useState([
-    { id:"g1", name:"Barcelona Trip", members:["Davis","Bradin","Nick"],
-      homeCurrency:"USD", tripCurrency:"EUR", fxRate:1.08, expenses:[] },
+  const [groups, setGroups] = useState([]);
+  const [activeGroupId, setActiveGroupId] = useState(null);
   ]);
   const [activeGroupId, setActiveGroupId] = useState(null);
   const [showNewGroup, setShowNewGroup] = useState(false);
