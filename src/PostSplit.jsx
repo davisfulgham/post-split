@@ -33,7 +33,6 @@ export default function PostSplit() {
   const [screen, setScreen] = useState("home");
   const [groups, setGroups] = useState([]);
   const [activeGroupId, setActiveGroupId] = useState(null);
-  const [activeGroupId, setActiveGroupId] = useState(null);
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [newGroup, setNewGroup] = useState({ name:"", members:"", home:"USD", trip:"EUR", rate:"" });
 
