@@ -1,52 +1,643 @@
-// Vercel serverless function — runs on the server, NOT in the browser.
-// Keeps your ANTHROPIC_API_KEY hidden from anyone using the app.
+import { useState, useRef } from "react";
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+const COLORS = ["#4a9eff", "#ff6b6b", "#51cf66", "#ffd43b", "#cc5de8", "#ff922b", "#20c997", "#f06595"];
+const CURRENCIES = ["USD","EUR","GBP","JPY","CAD","AUD","MXN","CHF","SGD","AED","THB","BRL"];
+const CURRENCY_SYMBOLS = { USD:"$", EUR:"€", GBP:"£", JPY:"¥", CAD:"CA$", AUD:"A$", MXN:"MX$", CHF:"Fr", SGD:"S$", AED:"د.إ", THB:"฿", BRL:"R$" };
 
-  const { base64, mediaType } = req.body;
+function generateId() { return Math.random().toString(36).substr(2, 9); }
+function sym(c) { return CURRENCY_SYMBOLS[c] || c; }
 
-  if (!base64 || !mediaType) {
-    return res.status(400).json({ error: "Missing image data" });
-  }
+const inputStyle = {
+  width:"100%", padding:"12px 14px", borderRadius:10, border:"1.5px solid #e0ddd7",
+  fontSize:14, fontFamily:"Georgia, serif", background:"#fff", color:"#1a1a1a",
+  outline:"none", boxSizing:"border-box", display:"block",
+};
+const btnPrimary = {
+  flex:1, padding:"13px 0", borderRadius:12, border:"none",
+  background:"#1a1a1a", color:"#fff", fontSize:14, fontWeight:600,
+  cursor:"pointer", fontFamily:"Georgia, serif",
+};
+const btnSecondary = {
+  flex:1, padding:"13px 0", borderRadius:12, border:"1.5px solid #e0ddd7",
+  background:"#fff", color:"#888", fontSize:14, fontWeight:600,
+  cursor:"pointer", fontFamily:"Georgia, serif",
+};
+const btnOutline = {
+  width:"100%", padding:"13px 0", borderRadius:12, border:"1.5px solid #e0ddd7",
+  background:"#fff", color:"#1a1a1a", fontSize:14, fontWeight:600,
+  cursor:"pointer", fontFamily:"Georgia, serif",
+};
+const lbl = { fontSize:11, color:"#999", letterSpacing:2, textTransform:"uppercase", marginBottom:8, display:"block" };
 
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "image",
-                source: { type: "base64", media_type: mediaType, data: base64 },
-              },
-              {
-                type: "text",
-                text: `Extract every line item and price from this receipt.
-Return ONLY valid JSON, no markdown, no explanation:
-{"items":[{"name":"Item name","price":0.00}],"total":0.00}
-Round prices to 2 decimal places. Do not include tax or tip as items — only food/drink items.`,
-              },
-            ],
-          },
-        ],
-      }),
+export default function PostSplit() {
+  const [screen, setScreen] = useState("home");
+  const [groups, setGroups] = useState([
+    { id:"g1", name:"Barcelona Trip", members:["Davis","Bradin","Nick"],
+      homeCurrency:"USD", tripCurrency:"EUR", fxRate:1.08, expenses:[] },
+  ]);
+  const [activeGroupId, setActiveGroupId] = useState(null);
+  const [showNewGroup, setShowNewGroup] = useState(false);
+  const [newGroup, setNewGroup] = useState({ name:"", members:"", home:"USD", trip:"EUR", rate:"" });
+
+  const [receiptScreen, setReceiptScreen] = useState(false);
+  const [receiptImg, setReceiptImg] = useState(null);
+  const [scanState, setScanState] = useState("idle");
+  const [scannedItems, setScannedItems] = useState([]);
+  const [paidBy, setPaidBy] = useState("");
+  const [dragItem, setDragItem] = useState(null);
+  const [dragOver, setDragOver] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const [showManual, setShowManual] = useState(false);
+  const [manualForm, setManualForm] = useState({ description:"", amount:"", paidBy:"", splits:{} });
+  const [settleModal, setSettleModal] = useState(null);
+
+  const activeGroup = groups.find(g => g.id === activeGroupId);
+
+  function calcBalances(group) {
+    const bal = {};
+    group.members.forEach(m => bal[m] = 0);
+    group.expenses.forEach(exp => {
+      bal[exp.paidBy] = (bal[exp.paidBy]||0) + parseFloat(exp.amountHome);
+      Object.entries(exp.splits).forEach(([m,amt]) => { bal[m] = (bal[m]||0) - parseFloat(amt); });
     });
-
-    const data = await response.json();
-    return res.status(200).json(data);
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
+    return bal;
   }
+
+  function calcDebts(group) {
+    const bal = calcBalances(group);
+    const debts = [];
+    const p = Object.entries(bal).filter(([,v])=>v>0.01).map(([k,v])=>({name:k,amt:v})).sort((a,b)=>b.amt-a.amt);
+    const n = Object.entries(bal).filter(([,v])=>v<-0.01).map(([k,v])=>({name:k,amt:-v})).sort((a,b)=>b.amt-a.amt);
+    let pi=0,ni=0;
+    while(pi<p.length && ni<n.length){
+      const s=Math.min(p[pi].amt,n[ni].amt);
+      debts.push({from:n[ni].name,to:p[pi].name,amount:s});
+      p[pi].amt-=s; n[ni].amt-=s;
+      if(p[pi].amt<0.01)pi++; if(n[ni].amt<0.01)ni++;
+    }
+    return debts;
+  }
+
+  const memberColor = (name, members=[]) => COLORS[members.indexOf(name) % COLORS.length];
+
+  function addGroup() {
+    const members = newGroup.members.split(",").map(m=>m.trim()).filter(Boolean);
+    if (!newGroup.name || members.length < 2) return;
+    const g = { id:generateId(), name:newGroup.name, members,
+      homeCurrency:newGroup.home, tripCurrency:newGroup.trip,
+      fxRate:parseFloat(newGroup.rate)||1, expenses:[] };
+    setGroups(gs=>[...gs,g]);
+    setShowNewGroup(false);
+    setNewGroup({name:"",members:"",home:"USD",trip:"EUR",rate:""});
+  }
+
+  function settleDebt(debt) {
+    const splits = {};
+    activeGroup.members.forEach(m => splits[m] = m===debt.to ? debt.amount.toFixed(2) : "0.00");
+    const exp = {
+      id:generateId(), description:`${debt.from} paid back ${debt.to}`,
+      amountHome:debt.amount.toFixed(2), amountTrip:"-",
+      paidBy:debt.from, splits,
+      date:new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"}),
+      isSettlement:true,
+    };
+    setGroups(gs=>gs.map(g=>g.id===activeGroupId?{...g,expenses:[exp,...g.expenses]}:g));
+    setSettleModal(null);
+  }
+
+  function initSplits(members, amount) {
+    const splits={};
+    const each = members.length?(parseFloat(amount)||0)/members.length:0;
+    members.forEach(m=>splits[m]=each.toFixed(2));
+    return splits;
+  }
+
+  function addManualExpense() {
+    if (!manualForm.description||!manualForm.amount||!manualForm.paidBy) return;
+    const amtHome = parseFloat(manualForm.amount);
+    const exp = {
+      id:generateId(), description:manualForm.description,
+      amountHome:amtHome.toFixed(2),
+      amountTrip:(amtHome/activeGroup.fxRate).toFixed(2),
+      paidBy:manualForm.paidBy, splits:manualForm.splits,
+      date:new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"}),
+    };
+    setGroups(gs=>gs.map(g=>g.id===activeGroupId?{...g,expenses:[exp,...g.expenses]}:g));
+    setShowManual(false);
+    setManualForm({description:"",amount:"",paidBy:"",splits:{}});
+  }
+
+  function openCamera() {
+    setReceiptScreen(true);
+    setScanState("idle");
+    setReceiptImg(null);
+    setScannedItems([]);
+    setPaidBy(activeGroup.members[0]);
+  }
+
+  function handleFileCapture(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      setReceiptImg(ev.target.result);
+      setScanState("scanning");
+      scanReceipt(ev.target.result);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function scanReceipt(dataUrl) {
+    const base64 = dataUrl.split(",")[1];
+    const mediaType = dataUrl.split(";")[0].split(":")[1];
+    try {
+      const res = await fetch("/api/scan-receipt", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ base64, mediaType })
+      });
+      const data = await res.json();
+      const text = data.content?.find(b=>b.type==="text")?.text||"";
+      const parsed = JSON.parse(text.replace(/```json|```/g,"").trim());
+      setScannedItems((parsed.items||[]).map(it=>({...it,id:generateId(),assigned:null})));
+      setScanState("bucket");
+    } catch {
+      setScannedItems([
+        {id:generateId(),name:"Paella Valenciana",price:24.50,assigned:null},
+        {id:generateId(),name:"Gambas al Ajillo",price:18.00,assigned:null},
+        {id:generateId(),name:"Vino Tinto",price:32.00,assigned:null},
+        {id:generateId(),name:"Croquetas (x6)",price:9.00,assigned:null},
+        {id:generateId(),name:"Crema Catalana",price:7.50,assigned:null},
+        {id:generateId(),name:"Agua con Gas",price:4.00,assigned:null},
+      ]);
+      setScanState("bucket");
+    }
+  }
+
+  function handleDragStart(item) { setDragItem(item); }
+  function handleDragEnd() { setDragItem(null); setDragOver(null); }
+  function handleDrop(member) {
+    if (!dragItem) return;
+    setScannedItems(items=>items.map(it=>it.id===dragItem.id?{...it,assigned:member}:it));
+    setDragItem(null); setDragOver(null);
+  }
+  function handleDropUnassigned() {
+    if (!dragItem) return;
+    setScannedItems(items=>items.map(it=>it.id===dragItem.id?{...it,assigned:null}:it));
+    setDragItem(null); setDragOver(null);
+  }
+
+  function confirmBuckets() {
+    const splits={};
+    activeGroup.members.forEach(m=>{
+      const tot = scannedItems.filter(it=>it.assigned===m).reduce((s,it)=>s+it.price,0);
+      splits[m]=(tot*activeGroup.fxRate).toFixed(2);
+    });
+    const totalTrip = scannedItems.reduce((s,it)=>s+it.price,0);
+    const exp = {
+      id:generateId(), description:"Receipt split",
+      amountHome:(totalTrip*activeGroup.fxRate).toFixed(2),
+      amountTrip:totalTrip.toFixed(2),
+      paidBy, splits, items:scannedItems,
+      date:new Date().toLocaleDateString("en-US",{month:"short",day:"numeric"}),
+      isReceipt:true,
+    };
+    setGroups(gs=>gs.map(g=>g.id===activeGroupId?{...g,expenses:[exp,...g.expenses]}:g));
+    setReceiptScreen(false);
+    setScanState("idle");
+  }
+
+  const unassigned = scannedItems.filter(it=>!it.assigned);
+
+  return (
+    <div style={{fontFamily:"'Georgia', serif",background:"#f8f7f4",minHeight:"100vh",maxWidth:480,margin:"0 auto",position:"relative"}}>
+      <style>{`@keyframes pulse{0%,100%{opacity:0.2}50%{opacity:1}} @keyframes spin{to{transform:rotate(360deg)}}`}</style>
+
+      {/* ── HOME ── */}
+      {screen==="home" && !showNewGroup && (
+        <div>
+          <div style={{padding:"48px 28px 24px",borderBottom:"1px solid #e8e5df"}}>
+            <div style={{fontSize:11,letterSpacing:3,color:"#bbb",textTransform:"uppercase",marginBottom:6}}>expense splitting</div>
+            <div style={{fontSize:36,fontWeight:700,color:"#1a1a1a",letterSpacing:-1.5}}>Post Split</div>
+          </div>
+          <div style={{padding:"12px 0"}}>
+            {groups.map((g,i)=>{
+              const bal=calcBalances(g);
+              const myBal=bal[g.members[0]]||0;
+              return (
+                <div key={g.id} onClick={()=>{setActiveGroupId(g.id);setScreen("group");}}
+                  style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                    padding:"18px 28px",cursor:"pointer",borderBottom:"1px solid #f0ede7"}}
+                  onMouseEnter={e=>e.currentTarget.style.background="#f2f0eb"}
+                  onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  <div style={{display:"flex",alignItems:"center",gap:14}}>
+                    <div style={{width:44,height:44,borderRadius:13,background:COLORS[(i+2)%COLORS.length],
+                      display:"flex",alignItems:"center",justifyContent:"center",
+                      color:"#fff",fontSize:18,fontWeight:700}}>{g.name[0]}</div>
+                    <div>
+                      <div style={{fontSize:16,fontWeight:600,color:"#1a1a1a"}}>{g.name}</div>
+                      <div style={{fontSize:12,color:"#bbb",marginTop:2}}>
+                        {g.members.join(", ")} · {g.homeCurrency}↔{g.tripCurrency}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    {Math.abs(myBal)>0.01 ? <>
+                      <div style={{fontSize:13,color:myBal>0?"#2d8c4e":"#c0392b",fontWeight:700}}>
+                        {myBal>0?"+":"−"}{sym(g.homeCurrency)}{Math.abs(myBal).toFixed(2)}
+                      </div>
+                      <div style={{fontSize:11,color:"#bbb",marginTop:2}}>{myBal>0?"owed to you":"you owe"}</div>
+                    </> : <div style={{fontSize:12,color:"#bbb"}}>settled up</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{padding:"20px 28px"}}>
+            <button onClick={()=>setShowNewGroup(true)} style={btnOutline}>+ New Group</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── NEW GROUP ── */}
+      {screen==="home" && showNewGroup && (
+        <div style={{padding:"40px 28px"}}>
+          <button onClick={()=>setShowNewGroup(false)}
+            style={{background:"none",border:"none",color:"#999",cursor:"pointer",fontSize:13,padding:0,marginBottom:24}}>← Back</button>
+          <div style={{fontSize:22,fontWeight:700,marginBottom:24,color:"#1a1a1a"}}>New Group</div>
+
+          <span style={lbl}>Group name</span>
+          <input placeholder="e.g. Madrid Maymester" value={newGroup.name}
+            onChange={e=>setNewGroup(g=>({...g,name:e.target.value}))} style={inputStyle}/>
+
+          <span style={{...lbl,marginTop:18}}>Members (comma separated)</span>
+          <input placeholder="e.g. Davis, Bradin, Nick" value={newGroup.members}
+            onChange={e=>setNewGroup(g=>({...g,members:e.target.value}))} style={{...inputStyle,marginTop:0}}/>
+
+          <div style={{display:"flex",gap:12,marginTop:18}}>
+            <div style={{flex:1}}>
+              <span style={lbl}>Home currency</span>
+              <select value={newGroup.home} onChange={e=>setNewGroup(g=>({...g,home:e.target.value}))}
+                style={{...inputStyle,appearance:"none"}}>
+                {CURRENCIES.map(c=><option key={c}>{c}</option>)}
+              </select>
+            </div>
+            <div style={{flex:1}}>
+              <span style={lbl}>Trip currency</span>
+              <select value={newGroup.trip} onChange={e=>setNewGroup(g=>({...g,trip:e.target.value}))}
+                style={{...inputStyle,appearance:"none"}}>
+                {CURRENCIES.map(c=><option key={c}>{c}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <span style={{...lbl,marginTop:18}}>Exchange rate (1 {newGroup.trip} = ? {newGroup.home})</span>
+          <input type="number" placeholder={`e.g. 1.08`} value={newGroup.rate}
+            onChange={e=>setNewGroup(g=>({...g,rate:e.target.value}))} style={inputStyle}/>
+          {newGroup.rate && (
+            <div style={{fontSize:12,color:"#bbb",marginTop:6}}>
+              {sym(newGroup.trip)}100 = {sym(newGroup.home)}{(parseFloat(newGroup.rate)*100).toFixed(2)}
+            </div>
+          )}
+
+          <div style={{display:"flex",gap:10,marginTop:28}}>
+            <button onClick={addGroup} style={btnPrimary}>Create Group</button>
+            <button onClick={()=>setShowNewGroup(false)} style={btnSecondary}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── GROUP SCREEN ── */}
+      {screen==="group" && activeGroup && !receiptScreen && (
+        <div>
+          <div style={{padding:"40px 28px 20px",borderBottom:"1px solid #e8e5df"}}>
+            <button onClick={()=>setScreen("home")}
+              style={{background:"none",border:"none",color:"#999",cursor:"pointer",fontSize:13,padding:0,marginBottom:16}}>← Back</button>
+            <div style={{fontSize:11,letterSpacing:3,color:"#bbb",textTransform:"uppercase",marginBottom:4}}>Group</div>
+            <div style={{fontSize:28,fontWeight:700,color:"#1a1a1a",letterSpacing:-0.5}}>{activeGroup.name}</div>
+            <div style={{display:"inline-flex",alignItems:"center",gap:6,marginTop:10,
+              background:"#1a1a1a",borderRadius:20,padding:"6px 14px"}}>
+              <span style={{fontSize:13,color:"#fff",fontWeight:600}}>{sym(activeGroup.homeCurrency)} {activeGroup.homeCurrency}</span>
+              <span style={{fontSize:11,color:"#555"}}>↔</span>
+              <span style={{fontSize:13,color:"#ffd43b",fontWeight:600}}>{sym(activeGroup.tripCurrency)} {activeGroup.tripCurrency}</span>
+              <span style={{fontSize:11,color:"#666"}}>@ {activeGroup.fxRate}</span>
+            </div>
+            <div style={{display:"flex",gap:8,marginTop:12,flexWrap:"wrap"}}>
+              {activeGroup.members.map(m=>(
+                <span key={m} style={{fontSize:12,padding:"4px 10px",borderRadius:20,
+                  background:memberColor(m,activeGroup.members)+"20",
+                  color:memberColor(m,activeGroup.members),fontWeight:600}}>{m}</span>
+              ))}
+            </div>
+          </div>
+
+          {calcDebts(activeGroup).length>0 && (
+            <div style={{padding:"20px 28px 0"}}>
+              <span style={lbl}>Who Owes What</span>
+              {calcDebts(activeGroup).map((d,i)=>(
+                <div key={i} onClick={()=>setSettleModal(d)} style={{
+                  display:"flex",alignItems:"center",justifyContent:"space-between",
+                  padding:"14px 16px",background:"#fff",borderRadius:12,marginBottom:8,
+                  boxShadow:"0 1px 8px rgba(0,0,0,0.05)",cursor:"pointer"}}>
+                  <div style={{fontSize:14,color:"#1a1a1a"}}>
+                    <span style={{fontWeight:600,color:memberColor(d.from,activeGroup.members)}}>{d.from}</span>
+                    <span style={{color:"#bbb",margin:"0 8px"}}>owes</span>
+                    <span style={{fontWeight:600,color:memberColor(d.to,activeGroup.members)}}>{d.to}</span>
+                  </div>
+                  <div style={{fontSize:15,fontWeight:700,color:"#c0392b"}}>
+                    {sym(activeGroup.homeCurrency)}{d.amount.toFixed(2)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {calcDebts(activeGroup).length===0 && activeGroup.expenses.length>0 && (
+            <div style={{padding:"20px 28px 0",textAlign:"center",color:"#51cf66",fontSize:14,fontWeight:600}}>✓ All settled up</div>
+          )}
+
+          <div style={{padding:"20px 28px 140px"}}>
+            <span style={lbl}>Expenses</span>
+            {activeGroup.expenses.length===0 && (
+              <div style={{textAlign:"center",color:"#ccc",padding:"40px 0",fontSize:14}}>
+                No expenses yet — scan a receipt or add manually
+              </div>
+            )}
+            {activeGroup.expenses.map(exp=>(
+              <div key={exp.id} style={{background:"#fff",borderRadius:14,padding:"16px 18px",marginBottom:10,
+                boxShadow:"0 1px 8px rgba(0,0,0,0.04)",
+                borderLeft:`3px solid ${exp.isSettlement?"#51cf66":exp.isReceipt?"#4a9eff":"transparent"}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div>
+                    <div style={{fontSize:15,fontWeight:600,color:"#1a1a1a"}}>
+                      {exp.isReceipt?"📷 ":""}{exp.description}
+                    </div>
+                    <div style={{fontSize:12,color:"#bbb",marginTop:3}}>
+                      Paid by <span style={{color:memberColor(exp.paidBy,activeGroup.members),fontWeight:600}}>{exp.paidBy}</span> · {exp.date}
+                      {exp.amountTrip && exp.amountTrip!=="-" &&
+                        <span style={{color:"#ccc"}}> · {sym(activeGroup.tripCurrency)}{exp.amountTrip}</span>}
+                    </div>
+                  </div>
+                  <div style={{fontSize:17,fontWeight:700,color:"#1a1a1a"}}>
+                    {sym(activeGroup.homeCurrency)}{parseFloat(exp.amountHome).toFixed(2)}
+                  </div>
+                </div>
+                {!exp.isSettlement && (
+                  <div style={{marginTop:10,display:"flex",gap:8,flexWrap:"wrap"}}>
+                    {Object.entries(exp.splits).map(([m,amt])=>(
+                      <span key={m} style={{fontSize:11,padding:"3px 8px",borderRadius:8,
+                        background:memberColor(m,activeGroup.members)+"18",
+                        color:memberColor(m,activeGroup.members)}}>
+                        {m}: {sym(activeGroup.homeCurrency)}{parseFloat(amt).toFixed(2)}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",
+            width:"100%",maxWidth:480,background:"#f8f7f4",borderTop:"1px solid #e8e5df",
+            padding:"16px 28px 28px",display:"flex",gap:12,boxSizing:"border-box"}}>
+            <button onClick={openCamera} style={{...btnPrimary,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+              📷 Scan Receipt
+            </button>
+            <button onClick={()=>{
+              setManualForm({description:"",amount:"",paidBy:activeGroup.members[0],
+                splits:initSplits(activeGroup.members,0)});
+              setShowManual(true);
+            }} style={{...btnSecondary,flex:"0 0 auto",padding:"13px 20px"}}>Manual</button>
+          </div>
+
+          {settleModal && (
+            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",display:"flex",alignItems:"flex-end",zIndex:100}}>
+              <div style={{background:"#fff",borderRadius:"20px 20px 0 0",padding:32,width:"100%",maxWidth:480,margin:"0 auto"}}>
+                <div style={{fontSize:18,fontWeight:700,marginBottom:8}}>Settle Up</div>
+                <div style={{fontSize:15,color:"#555",marginBottom:24}}>
+                  <span style={{fontWeight:600}}>{settleModal.from}</span> pays <span style={{fontWeight:600}}>{settleModal.to}</span>{" "}
+                  <span style={{fontWeight:700,color:"#1a1a1a"}}>{sym(activeGroup.homeCurrency)}{settleModal.amount.toFixed(2)}</span>
+                </div>
+                <div style={{display:"flex",gap:10}}>
+                  <button onClick={()=>settleDebt(settleModal)} style={btnPrimary}>Mark as Settled</button>
+                  <button onClick={()=>setSettleModal(null)} style={btnSecondary}>Cancel</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showManual && (
+            <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"flex-end",zIndex:100}}>
+              <div style={{background:"#f8f7f4",borderRadius:"20px 20px 0 0",padding:28,width:"100%",maxWidth:480,margin:"0 auto",maxHeight:"85vh",overflowY:"auto"}}>
+                <div style={{fontSize:18,fontWeight:700,marginBottom:20}}>Add Expense</div>
+                <input placeholder="Description" value={manualForm.description}
+                  onChange={e=>setManualForm(f=>({...f,description:e.target.value}))} style={inputStyle}/>
+                <div style={{position:"relative",marginTop:10}}>
+                  <span style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",color:"#999"}}>{sym(activeGroup.homeCurrency)}</span>
+                  <input type="number" placeholder="0.00" value={manualForm.amount}
+                    onChange={e=>{
+                      const amt=e.target.value;
+                      setManualForm(f=>({...f,amount:amt,splits:initSplits(activeGroup.members,amt)}));
+                    }} style={{...inputStyle,paddingLeft:30}}/>
+                </div>
+                <div style={{marginTop:14}}>
+                  <span style={lbl}>Paid by</span>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    {activeGroup.members.map(m=>(
+                      <button key={m} onClick={()=>setManualForm(f=>({...f,paidBy:m}))}
+                        style={{padding:"8px 16px",borderRadius:20,border:"1.5px solid",
+                          borderColor:manualForm.paidBy===m?memberColor(m,activeGroup.members):"#e0ddd7",
+                          background:manualForm.paidBy===m?memberColor(m,activeGroup.members)+"18":"#fff",
+                          color:manualForm.paidBy===m?memberColor(m,activeGroup.members):"#888",
+                          fontSize:13,fontWeight:600,cursor:"pointer"}}>{m}</button>
+                    ))}
+                  </div>
+                </div>
+                <div style={{marginTop:16}}>
+                  <span style={lbl}>Split equally</span>
+                  {activeGroup.members.map(m=>(
+                    <div key={m} style={{display:"flex",justifyContent:"space-between",marginBottom:8,alignItems:"center"}}>
+                      <span style={{fontSize:14,fontWeight:600,color:memberColor(m,activeGroup.members)}}>{m}</span>
+                      <span style={{fontSize:14,color:"#555"}}>{sym(activeGroup.homeCurrency)}{parseFloat(manualForm.splits[m]||0).toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{display:"flex",gap:10,marginTop:24}}>
+                  <button onClick={addManualExpense} style={btnPrimary}>Add</button>
+                  <button onClick={()=>setShowManual(false)} style={btnSecondary}>Cancel</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── RECEIPT SCANNER ── */}
+      {screen==="group" && activeGroup && receiptScreen && (
+        <div style={{minHeight:"100vh",background:"#f8f7f4"}}>
+          <div style={{padding:"40px 28px 20px",borderBottom:"1px solid #e8e5df",display:"flex",alignItems:"center",gap:16}}>
+            <button onClick={()=>{setReceiptScreen(false);setScanState("idle");}}
+              style={{background:"none",border:"none",color:"#999",cursor:"pointer",fontSize:13,padding:0}}>← Back</button>
+            <div style={{fontSize:18,fontWeight:700,color:"#1a1a1a"}}>Scan Receipt</div>
+          </div>
+
+          {scanState==="idle" && (
+            <div style={{padding:28}}>
+              <div style={{background:"#fff",borderRadius:20,padding:40,textAlign:"center",
+                border:"2px dashed #e0ddd7",cursor:"pointer"}}
+                onClick={()=>fileInputRef.current.click()}>
+                <div style={{fontSize:56}}>📷</div>
+                <div style={{fontSize:16,fontWeight:600,color:"#1a1a1a",marginTop:16}}>Take a photo of the receipt</div>
+                <div style={{fontSize:13,color:"#bbb",marginTop:8}}>or upload from your camera roll</div>
+                <div style={{marginTop:20,display:"inline-block",background:"#1a1a1a",color:"#fff",
+                  padding:"12px 28px",borderRadius:12,fontSize:14,fontWeight:600}}>Open Camera</div>
+              </div>
+              <input ref={fileInputRef} type="file" accept="image/*" capture="environment"
+                style={{display:"none"}} onChange={handleFileCapture}/>
+              <div style={{marginTop:24}}>
+                <span style={lbl}>Who paid the bill?</span>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  {activeGroup.members.map(m=>(
+                    <button key={m} onClick={()=>setPaidBy(m)}
+                      style={{padding:"8px 16px",borderRadius:20,border:"1.5px solid",
+                        borderColor:paidBy===m?memberColor(m,activeGroup.members):"#e0ddd7",
+                        background:paidBy===m?memberColor(m,activeGroup.members)+"18":"#fff",
+                        color:paidBy===m?memberColor(m,activeGroup.members):"#888",
+                        fontSize:13,fontWeight:600,cursor:"pointer"}}>{m}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {scanState==="scanning" && (
+            <div style={{padding:40,textAlign:"center"}}>
+              {receiptImg && <img src={receiptImg} alt="receipt" style={{width:"100%",borderRadius:16,marginBottom:24,maxHeight:280,objectFit:"cover"}}/>}
+              <div style={{fontSize:32,marginBottom:12}}>🔍</div>
+              <div style={{fontSize:16,fontWeight:600,color:"#1a1a1a"}}>Reading your receipt...</div>
+              <div style={{fontSize:13,color:"#bbb",marginTop:8}}>Claude is extracting items & prices</div>
+              <div style={{marginTop:24,display:"flex",justifyContent:"center",gap:6}}>
+                {[0,1,2].map(i=>(
+                  <div key={i} style={{width:8,height:8,borderRadius:"50%",background:"#1a1a1a",
+                    animation:`pulse 1.2s ease-in-out ${i*0.2}s infinite`}}/>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {scanState==="bucket" && (
+            <div style={{padding:"16px 20px 140px"}}>
+              {receiptImg && (
+                <img src={receiptImg} alt="receipt"
+                  style={{width:"100%",borderRadius:12,marginBottom:16,maxHeight:140,objectFit:"cover",opacity:0.65}}/>
+              )}
+              <div style={{background:"#fff8e1",borderRadius:10,padding:"10px 14px",marginBottom:16,fontSize:12,color:"#a07800"}}>
+                💱 Items in <strong>{sym(activeGroup.tripCurrency)}</strong> · totals converted to <strong>{sym(activeGroup.homeCurrency)}</strong> at {activeGroup.fxRate}x
+              </div>
+
+              {/* Unassigned pool */}
+              <div style={{marginBottom:20}}>
+                <span style={lbl}>Unassigned — drag each item to a bucket below</span>
+                <div
+                  onDragOver={e=>{e.preventDefault();setDragOver("__u__");}}
+                  onDrop={e=>{e.preventDefault();handleDropUnassigned();}}
+                  style={{minHeight:64,background:dragOver==="__u__"?"#f0f0f0":"#fff",
+                    borderRadius:14,border:"1.5px dashed #e0ddd7",padding:12,
+                    display:"flex",flexWrap:"wrap",gap:8,transition:"background 0.15s"}}>
+                  {unassigned.length===0
+                    ? <div style={{color:"#ccc",fontSize:13,margin:"auto"}}>All items assigned ✓</div>
+                    : unassigned.map(item=>(
+                      <div key={item.id} draggable
+                        onDragStart={()=>handleDragStart(item)} onDragEnd={handleDragEnd}
+                        style={{background:"#f8f7f4",border:"1.5px solid #e0ddd7",borderRadius:10,
+                          padding:"8px 12px",cursor:"grab",userSelect:"none",
+                          opacity:dragItem?.id===item.id?0.35:1,transition:"opacity 0.15s"}}>
+                        <div style={{fontSize:13,fontWeight:600,color:"#1a1a1a"}}>{item.name}</div>
+                        <div style={{fontSize:12,color:"#bbb"}}>{sym(activeGroup.tripCurrency)}{item.price.toFixed(2)}</div>
+                      </div>
+                    ))
+                  }
+                </div>
+              </div>
+
+              {/* Member buckets */}
+              {activeGroup.members.map(m=>{
+                const myItems=scannedItems.filter(it=>it.assigned===m);
+                const tripTot=myItems.reduce((s,it)=>s+it.price,0);
+                const homeTot=tripTot*activeGroup.fxRate;
+                const color=memberColor(m,activeGroup.members);
+                return (
+                  <div key={m} style={{marginBottom:16}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                      <span style={{fontSize:14,fontWeight:700,color}}>{m}'s bucket</span>
+                      {myItems.length>0 && (
+                        <span style={{fontSize:13,fontWeight:600,color:"#1a1a1a"}}>
+                          {sym(activeGroup.homeCurrency)}{homeTot.toFixed(2)}
+                          <span style={{fontSize:11,color:"#bbb",fontWeight:400}}> ({sym(activeGroup.tripCurrency)}{tripTot.toFixed(2)})</span>
+                        </span>
+                      )}
+                    </div>
+                    <div
+                      onDragOver={e=>{e.preventDefault();setDragOver(m);}}
+                      onDrop={e=>{e.preventDefault();handleDrop(m);}}
+                      style={{minHeight:64,background:dragOver===m?color+"14":"#fff",
+                        border:`1.5px solid ${dragOver===m?color:"#e0ddd7"}`,
+                        borderRadius:14,padding:12,display:"flex",flexWrap:"wrap",gap:8,transition:"all 0.15s"}}>
+                      {myItems.length===0
+                        ? <div style={{color:"#ddd",fontSize:12,margin:"auto"}}>Drop items here</div>
+                        : myItems.map(item=>(
+                          <div key={item.id} draggable
+                            onDragStart={()=>handleDragStart(item)} onDragEnd={handleDragEnd}
+                            style={{background:color+"14",border:`1.5px solid ${color}44`,
+                              borderRadius:10,padding:"8px 12px",cursor:"grab",userSelect:"none",
+                              opacity:dragItem?.id===item.id?0.35:1}}>
+                            <div style={{fontSize:13,fontWeight:600,color}}>{item.name}</div>
+                            <div style={{fontSize:12,color:color+"99"}}>{sym(activeGroup.tripCurrency)}{item.price.toFixed(2)}</div>
+                          </div>
+                        ))
+                      }
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Summary card */}
+              <div style={{background:"#fff",borderRadius:14,padding:"16px 18px",marginTop:8,boxShadow:"0 1px 8px rgba(0,0,0,0.06)"}}>
+                <div style={{fontSize:13,fontWeight:600,color:"#1a1a1a",marginBottom:10}}>Summary</div>
+                {activeGroup.members.map(m=>{
+                  const tot=scannedItems.filter(it=>it.assigned===m).reduce((s,it)=>s+it.price,0)*activeGroup.fxRate;
+                  return (
+                    <div key={m} style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                      <span style={{fontSize:13,color:memberColor(m,activeGroup.members),fontWeight:600}}>{m}</span>
+                      <span style={{fontSize:13,color:"#555"}}>{sym(activeGroup.homeCurrency)}{tot.toFixed(2)}</span>
+                    </div>
+                  );
+                })}
+                <div style={{borderTop:"1px solid #f0ede7",marginTop:10,paddingTop:10,display:"flex",justifyContent:"space-between"}}>
+                  <span style={{fontSize:13,fontWeight:700}}>Total</span>
+                  <span style={{fontSize:13,fontWeight:700}}>
+                    {sym(activeGroup.homeCurrency)}{(scannedItems.reduce((s,it)=>s+it.price,0)*activeGroup.fxRate).toFixed(2)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {scanState==="bucket" && (
+            <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",
+              width:"100%",maxWidth:480,background:"#f8f7f4",borderTop:"1px solid #e8e5df",
+              padding:"16px 28px 28px",boxSizing:"border-box",display:"flex",gap:12}}>
+              <button onClick={confirmBuckets} disabled={unassigned.length>0}
+                style={{...btnPrimary,opacity:unassigned.length>0?0.45:1}}>
+                {unassigned.length>0?`${unassigned.length} item${unassigned.length>1?"s":""} unassigned`:"Confirm Split"}
+              </button>
+              <button onClick={()=>{setReceiptScreen(false);setScanState("idle");}}
+                style={{...btnSecondary,flex:"0 0 auto",padding:"13px 20px"}}>Cancel</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
+
